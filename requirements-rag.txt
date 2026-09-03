@@ -1,0 +1,12 @@
+# MARS 选址系统 —— 可选 RAG / 向量库依赖
+# 仅当需要启用 Chroma 向量检索 / GraphRAG 时安装：
+#   pip install -r requirements-rag.txt
+# 注意：sentence-transformers 会拉取 torch（体积较大，且对 Python 版本敏感）
+
+sentence-transformers>=2.2
+langchain-huggingface>=0.1
+langchain-chroma>=0.1
+chromadb>=0.4
+langchain-community>=0.2
+tqdm>=4.66
+networkx>=3.0

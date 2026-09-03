@@ -1,0 +1,33 @@
+# ===== 数据（汇纳商业数据，勿上传）=====
+mall_wide_table_shanghai_final_v3.csv
+mall_wide_table_shanghai_final_v3.bak.csv
+*.bak.csv
+
+# ===== 生成产物 / 大文件 =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+chroma_db/
+models/
+
+# ===== 运行时产物 =====
+memory/
+reports/
+
+# ===== 评测结果（可重新生成）=====
+*_result.json
+
+# ===== 密钥 / 环境 =====
+.env
+.env.*
+!.env.example
+
+# ===== 参考文档 =====
+*.pdf
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
