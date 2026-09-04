@@ -20,7 +20,7 @@ from collections import Counter
 
 import pandas as pd
 
-STORE = r"D:\Work\agent\data\biz_store.csv"
+STORE = "biz_store.csv"  # 原始门店表（本地文件，不随仓库分发）
 
 # ---- 纯垃圾 / 非品牌，整条丢弃 ----
 DROP_RE = re.compile(
@@ -122,7 +122,7 @@ def main():
     print("大商场 top 品牌 清洗前后对比")
     print("=" * 64)
     wide = pd.read_csv(
-        r"D:\Work\agent\data\data3\mall_wide_table_shanghai_final_v3.csv", dtype={"mall_id": str}
+        "mall_wide_table_shanghai_final_v3.csv", dtype={"mall_id": str}
     )
     for mall_kw in ["江桥万达", "中山公园龙之梦", "月星环球港"]:
         ids = wide[wide["mall_name"].str.contains(mall_kw, na=False)]["mall_id"].astype(str).unique()

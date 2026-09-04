@@ -1,9 +1,9 @@
 """
-MARS V7 FastAPI 服务
+MARS FastAPI 服务
 支持 SSE 流式输出 + RESTful API
 
-注意：本文件已与 mars_agent_v77.py 对齐。
-当前版本的 MARSV71Agent 不再包含 memory / reranker 子系统，
+注意：本文件已与 mars_agent.py 对齐。
+当前版本的 MARSAgent 不再包含 memory / reranker 子系统，
 相关端点已做无状态降级处理。
 """
 
@@ -86,8 +86,8 @@ def get_agent():
     vectorstore = load_vectorstore("./chroma_db")
 
     # 导入 MARS Agent
-    from mars_agent_v77 import MARSV71Agent
-    agent = MARSV71Agent(vectorstore, df_malls)
+    from mars_agent import MARSAgent
+    agent = MARSAgent(vectorstore, df_malls)
 
     print(f"[API] Agent 初始化完成，商场数: {len(df_malls)}")
 
@@ -106,16 +106,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="MARS V7 API",
+    title="MARS API",
     description="Memory-Augmented Reasoning for Spatial Decisions",
-    version="7.0.0",
+    version="1.0.0",
     lifespan=lifespan
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # 通配 origin 不得与 credentials 同开（浏览器会拒绝）
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -137,7 +137,7 @@ async def stream_react_process(query: str, agent) -> AsyncGenerator[str, None]:
 
     if route_result.get('route_to') == 'react_agent':
         if agent.react_agent is None:
-            from mars_agent_v77 import ReActAgent
+            from mars_agent import ReActAgent
             agent.react_agent = ReActAgent(agent.tool_registry, agent.llm_client)
 
         react_agent = agent.react_agent
@@ -208,9 +208,9 @@ async def stream_react_process(query: str, agent) -> AsyncGenerator[str, None]:
 @app.get("/")
 async def root():
     return {
-        "service": "MARS V7 API",
+        "service": "MARS API",
         "status": "running",
-        "version": "7.0.0",
+        "version": "1.0.0",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -346,7 +346,7 @@ async def get_stats():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("MARS V7 API Server")
+    print("MARS API Server")
     print("=" * 60)
     print("\nEndpoints:")
     print("  POST /api/search      - 搜索（支持流式）")

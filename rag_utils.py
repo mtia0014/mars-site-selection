@@ -2,7 +2,7 @@
 RAG 公共工具：嵌入模型加载 + 查询拆分 + 多查询混合检索
 
 统一嵌入模型（可用环境变量 EMBEDDING_MODEL 切换，默认 BAAI/bge-m3，1024 维）。
-mars_agent_v77 / mars_api / create_vectordb_v6 共用此模块，保证模型与向量库维度一致。
+mars_agent / mars_api / create_vectordb_v6 共用此模块，保证模型与向量库维度一致。
 
 说明：更换模型后必须重新运行 create_vectordb_v6.py 重建向量库，否则维度不一致会加载失败。
 """

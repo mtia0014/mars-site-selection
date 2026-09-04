@@ -2,6 +2,12 @@
 
 Memory-Augmented Reasoning for Spatial Decisions —— 商场选址检索问答系统。核心是「商场宽表 → 嵌入 → Chroma 向量库 → 多查询混合检索」。
 
+## Demo
+
+![MARS 选址问答 Demo](docs/mars_demo.png)
+
+> 自然语言提问 → Router 意图分流 → ReAct 多轮工具调用 → 结构化答案 + 数据溯源。
+
 ## 系统架构
 
 ```mermaid
@@ -55,7 +61,7 @@ mars-site-selection/
   mars_eval_50.py                         50 条评测集构建（7 类查询）
   eval_compare.py / eval_final.py         检索对比评估（基线 vs 混合 vs 混合+Reranker）
   eval_graphrag_ab.py / eval_graphrag_fusion.py  三路/四路 A/B（基线/混合/GraphRAG/融合）
-  mars_agent_v77.py                       主 Agent（ReAct + 9 工具 + Gradio 界面）
+  mars_agent.py                       主 Agent（ReAct + 9 工具 + Gradio 界面）
   mars_api.py                             FastAPI 服务（RESTful + SSE 流式）
   requirements.txt                        核心依赖（Gradio + API 最小集）
   requirements-rag.txt                    可选 RAG / 向量库依赖
@@ -70,7 +76,7 @@ mars-site-selection/
 
 ## 数据链路
 
-源数据来自某商业地产选址平台的内部业务库，共三张表：**商场主表**（全国商场基础信息）、**门店明细表**（唯一品牌门店来源，`mall_name` 列全空，只能靠 `mall_id` 关联）、**门店-商场匹配记录**（上海）。
+源数据来自一家商业地产数据服务方。
 
 因数据授权限制，表名、原始文件与具体体量不公开，仓库中也不含任何原始数据。
 
@@ -78,7 +84,7 @@ mars-site-selection/
 
 ## ⚠️ 数据可复现性说明
 
-**真实数据不随仓库分发。** 宽表 CSV（汇纳商业数据）、`chroma_db/`、`models/` 均因数据授权与体积原因未提交。
+**真实数据不随仓库分发。** 宽表 CSV、`chroma_db/`、`models/` 均因数据授权与体积原因未提交。
 
 为让仓库开箱即跑通，提供一份 **20 家虚构商场的合成样例**（`sample_data.csv`，40 列与真实宽表同构），由 `generate_sample_data.py` 生成。合成样例的 `mall_name` / `mall_id` / `address` 均为虚构，品牌、品类、客群画像为通用公开词，仅用于演示检索效果。
 
@@ -101,7 +107,7 @@ copy .env.example .env      # Linux/macOS 用 cp，然后编辑 .env 填入 DEEP
 python create_vectordb_v6.py
 
 # 6. 启动（二选一）
-python mars_agent_v77.py    # Web 界面 → http://127.0.0.1:7860
+python mars_agent.py    # Web 界面 → http://127.0.0.1:7860
 python mars_api.py          # FastAPI  → http://127.0.0.1:8000/docs
 ```
 
@@ -112,11 +118,15 @@ python mars_api.py          # FastAPI  → http://127.0.0.1:8000/docs
 
 ## ⚠️ 已知数据缺口
 
-**品牌门店数据只覆盖 337 / 747 个商场**，未覆盖的 410 家中包含相当一部分头部高端商场。
+**品牌门店数据只覆盖部分商场**，未覆盖的商场中包含一部分头部高端商场。
 
-- 这是**源表覆盖缺口，不是合并 bug**：门店表的 337 个 `mall_id` 是宽表 747 个的干净子集（`门店表 − 宽表 = 0`，零错配）。
+- 这是**源表覆盖缺口，不是合并 bug**：门店表的 `mall_id` 是宽表的干净子集（零错配）。
 - 缺品牌的商场靠 `position_text`（区域消费力描述）+ 客群 TGI 标签兜底，因此「奢侈 / 高收入」类查询仍能正常召回高端标的。
 - 要补齐需一张覆盖更全的门店表，现有数据源中不存在。
+
+## ⚠️ 竞品分析定位（实验性辅助信息）
+
+`CompetitorSearchAgent` 用 LLM 训练知识给出竞品「辅助信号」，**不属于核心事实链路**（LLM 不能当数据库）。模块会标注置信度、数据来源与「建议实地确认」；生产环境应接入实时品牌 / POI / 商业地产数据源。
 
 ## 重建向量库流程
 
@@ -194,4 +204,4 @@ python create_vectordb_v6.py
 - **融合才净胜**：图谱作为「多跳召回腿」补进 RRF，MRR 稳定 +0.05，且不拖累 easy。GraphRAG 不是取代 hybrid，是给它加一条腿。
 - **reranker（bge-reranker-base）不成立**：分数挤在 0.91~0.94 窄带无区分度，未接入。
 - **天花板**：品牌实体识别 + Brand 节点（`build_from_dataframe(df_brands=None)` 未建品牌边），品牌类查询（31/50）图谱空转，是 hard 复合约束拉不动的主因。
-- **落地**：融合已接入 `mars_agent_v77.py` 的 `_vector_search_malls`（惰性建图 + 融合→混合→纯向量三级回退）。
+- **落地**：融合已接入 `mars_agent.py` 的 `_vector_search_malls`（惰性建图 + 融合→混合→纯向量三级回退）。

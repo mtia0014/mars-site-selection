@@ -1,5 +1,5 @@
 """
-MARS V7.3: 详细报告版
+MARS v1.0: 详细报告版
 生成专业的选址分析报告，包含完整的数据支撑和推荐理由
 
 核心功能：
@@ -91,16 +91,16 @@ def to_json_serializable(obj):
 
 
 # ============================================================
-# 竞品分析 Agent（基于LLM知识）
+# 竞品分析 Agent（实验性 · LLM 辅助信号）
 # ============================================================
 
 class CompetitorSearchAgent:
     """
-    竞品分析 Agent - 基于LLM的训练知识判断品牌入驻情况
+    竞品分析 Agent —— 实验性辅助信息（experimental enrichment），非事实数据源
     
     说明：
-    - 由于外部搜索API无法在当前环境访问，使用LLM知识作为数据源
-    - DeepSeek的训练数据包含大量商场品牌信息，比硬编码的模拟数据更准确
+    - 外部搜索 API 当前环境不可用，暂用 LLM 训练知识作为实验性辅助信号（非事实数据源）
+    - 生产环境应接入实时品牌 / POI / 商业地产数据源，LLM 仅作辅助信号
     - 会明确标注可信度，提醒用户数据可能非最新
     
     优点：
@@ -208,7 +208,7 @@ class CompetitorSearchAgent:
                     "confidence": confidence,
                     "confidence_note": confidence_note,
                     "note": data.get("note", ""),
-                    "data_source": "LLM知识库",
+                    "data_source": "LLM辅助信号（实验性）",
                     "analysis": f"{mall_name}{category}品类：发现{len(competitors)}个竞品，{level}。{target_brand}{'已' if data.get('target_brand_exists') else '未'}入驻。[可信度:{confidence}]"
                 }
                 
@@ -352,7 +352,7 @@ class Tool:
 
 
 class ToolRegistry:
-    """工具注册中心 V7.1"""
+    """工具注册中心 v1.0"""
     
     def __init__(self, df_malls: pd.DataFrame, competitor_agent: CompetitorSearchAgent = None, vectorstore=None):
         self.df_malls = df_malls
@@ -424,10 +424,10 @@ class ToolRegistry:
             function=self._compare_malls
         ))
         
-        # 工具6: 竞品分析（基于LLM知识）
+        # 工具6: 竞品分析（实验性 · LLM辅助信号）
         self.register(Tool(
             name="analyze_brand_competition",
-            description="分析商场内的品牌竞争情况（基于LLM知识，会标注可信度）",
+            description="分析商场内的品牌竞争情况（实验性LLM辅助信号，会标注可信度与来源）",
             parameters={
                 "target_brand": "目标品牌(如'Nike')",
                 "category": "品类(运动/服装/餐饮)",
@@ -702,7 +702,7 @@ class ToolRegistry:
     
     def _analyze_brand_competition(self, target_brand: str, category: str,
                                    mall_names: List[str]) -> List[Dict]:
-        """【基于LLM知识】分析商场内的品牌竞争情况"""
+        """【实验性辅助信号】分析商场内的品牌竞争情况"""
         return self.competitor_agent.batch_analyze_competition(
             target_brand, category, mall_names[:3]  # 限制最多3个商场，避免LLM调用过多
         )
@@ -1022,7 +1022,7 @@ Final Answer:
 
 
 class ReActAgent:
-    """ReAct Agent V7.3"""
+    """ReAct Agent v1.0"""
     
     def __init__(self, tool_registry: ToolRegistry, llm_client=None):
         self.tools = tool_registry
@@ -1433,7 +1433,7 @@ Action Input: {{"target_brand": "{brand}", "category": "{category}", "mall_names
         # 报告结尾
         lines.append("---")
         lines.append(f"*报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-        lines.append("*数据来源: MARS智能选址系统 V7.3*")
+        lines.append("*数据来源: MARS智能选址系统 v1.0*")
         
         return "Thought: 已完成详细的选址分析报告\nFinal Answer:\n" + "\n".join(lines)
     
@@ -1877,8 +1877,8 @@ class HTMLReportGenerator:
         <!-- 页脚 -->
         <div class="footer">
             报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 
-            数据来源: MARS智能选址系统 V7.3 | 
-            © 汇纳科技
+            数据来源: MARS智能选址系统 v1.0 | 
+            © MARS
         </div>
     </div>
     
@@ -2247,8 +2247,8 @@ def _safe_json_load(s):
         return {}
 
 
-class MARSV71Agent:
-    """MARS V7.1 主Agent"""
+class MARSAgent:
+    """MARS v1.0 主Agent"""
     
     def __init__(self, vectorstore, df_malls: pd.DataFrame, user_id: str = "default"):
         self.vectorstore = vectorstore
@@ -2265,7 +2265,7 @@ class MARSV71Agent:
         self.react_agent = None
         self.llm_client = None
         
-        print(f"[MARS V7.1] 初始化完成")
+        print(f"[MARS v1.0] 初始化完成")
         print(f"  - 商场数据: {len(df_malls)}")
         print(f"  - 可用工具: {list(self.tool_registry.tools.keys())}")
     
@@ -2492,7 +2492,7 @@ class MARSV71Agent:
 # ============================================================
 
 print("=" * 60)
-print("MARS V7.3: 智能选址分析系统（含可视化报告）")
+print("MARS v1.0: 智能选址分析系统（含可视化报告）")
 print("=" * 60)
 
 print("\n加载数据...")
@@ -2522,7 +2522,7 @@ else:
     print("⚠️ 向量库未加载（缺少依赖或模型未下载），选址推荐功能不受影响")
 
 # 创建 Agent
-agent = MARSV71Agent(vectorstore, df_malls)
+agent = MARSAgent(vectorstore, df_malls)
 
 # Gradio 示例
 EXAMPLES = [
@@ -2532,10 +2532,10 @@ EXAMPLES = [
     ["帮我分析徐汇区适合运动品牌的商场"],
 ]
 
-with gr.Blocks(title="🧠 MARS V7.3") as demo:
+with gr.Blocks(title="🧠 MARS v1.0") as demo:
     
     gr.Markdown("""
-    # 🧠 MARS V7.3 - 智能选址分析系统
+    # 🧠 MARS v1.0 - 智能选址分析系统
     
     **核心功能**: 基于TGI客群匹配度的智能选址推荐，生成专业分析报告
     
@@ -2642,31 +2642,32 @@ with gr.Blocks(title="🧠 MARS V7.3") as demo:
         - 商场总数: **{len(df_malls)}**
         - 有客流数据: **{df_malls['traffic_daily'].notna().sum()}**
         
-        ### V7.1 改进
-        1. **移除不可靠数据依赖**: 不再使用 brand_count、*_density 等不完整字段
-        2. **新增网络搜索**: `search_brand_competition` 工具通过搜索获取真实竞品
-        3. **多Agent协作**: Router → ReAct → CompetitorSearchAgent
+        ### 检索与推理
+        - 三级混合检索：BM25 + 稠密 RRF + 知识图谱 2-hop（逐级回退）
+        - 多智能体协作：Router → ReAct → CompetitorSearchAgent
+        - 竞品分析为实验性 LLM 辅助信号（标注置信度与来源，非事实数据源）
         
-        ### 可用工具
-        - `search_mall`: 搜索商场（基础信息）
-        - `get_traffic_ranking`: 客流排名
-        - `match_customer_profile`: 客群匹配
-        - `get_mall_detail`: 商场详情
-        - `compare_malls`: 对比商场
-        - `search_brand_competition`: 🆕 **网络搜索竞品分析**
+        ### 可用工具（9 类）
+        - `search_mall`: 根据关键词和条件搜索商场，返回基础信息（评分、客流）
+        - `get_traffic_ranking`: 获取商场客流量排名
+        - `match_customer_profile`: 根据目标客群特征匹配商场
+        - `get_mall_detail`: 获取单个商场的详细信息
+        - `compare_malls`: 对比多个商场的基础指标
+        - `analyze_brand_competition`: 品牌竞争分析（实验性 LLM 辅助信号）
+        - `analyze_customer_profile`: 客群画像分析（年龄分布 / 消费水平 / TGI）
+        - `score_customer_match`: 客群匹配度评分（基于 TGI 指数）
+        - `vector_search_malls`: 语义检索（自然语言 → 相似商场）
         
-        ### 面试亮点
-        - 解决数据不全问题的工程能力
-        - 多Agent协作架构
-        - 网络搜索与结构化数据融合
-        - 优雅降级（搜索失败时有模拟数据兜底）
+        ### 优雅降级
+        - LLM Key 缺失时进入模拟模式，不影响界面演示
+        - 向量库未加载时，检索降级为提示、选址推荐不受影响
         """)
 
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 启动 MARS V7.1")
+    print("🚀 启动 MARS v1.0")
     print("=" * 60)
     print("访问: http://127.0.0.1:7860")
     print("=" * 60 + "\n")
-    demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True, theme=gr.themes.Soft())
+    demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=False, theme=gr.themes.Soft())

@@ -1,7 +1,7 @@
 """
-MARS V7 GraphRAG 模块
+MARS GraphRAG 模块
 基于商场-品牌-区域数据构建知识图谱
-
+"""
 
 import pandas as pd
 import numpy as np
