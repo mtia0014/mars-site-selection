@@ -2,11 +2,6 @@
 MARS V7 GraphRAG 模块
 基于商场-品牌-区域数据构建知识图谱
 
-面试考点:
-1. 为什么要用GraphRAG？解决传统RAG的什么问题？
-2. 知识图谱怎么构建？三元组怎么设计？
-3. 图谱查询和向量检索怎么结合？
-"""
 
 import pandas as pd
 import numpy as np
