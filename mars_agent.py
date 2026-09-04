@@ -399,6 +399,7 @@ class ToolRegistry:
                 "age_group": "目标年龄段(如'25-35')",
                 "consume_level": "消费水平(高/中高/中/低)",
                 "keywords": "其他关键词(如'白领 运动')",
+                "district": "区域名称(可选,如'徐汇区')",
                 "top_k": "返回数量(默认20，可设10-50)"
             },
             function=self._match_customer_profile
@@ -553,16 +554,25 @@ class ToolRegistry:
             "score_market": to_json_serializable(row.get('score_market', 0)) or 0,
         } for rank, (_, row) in enumerate(df.iterrows(), 1)]
     
-    def _match_customer_profile(self, age_group: str = None, 
+    def _match_customer_profile(self, age_group: str = None,
                                 consume_level: str = None,
                                 keywords: str = None,
+                                district: str = None,
                                 top_k: int = 20) -> List[Dict]:
         """
         客群匹配 - 使用多样化采样策略
         返回更多样的商场，而不只是评分最高的几个
         """
         df = self.df_malls.copy()
-        
+
+        # 区域过滤：先校验值是否命中真实区（支持「徐汇」/「徐汇区」/「浦东」），
+        # 未命中（如「上海市」这种市级名）就忽略该参数返回全量，而不是静默返回空。
+        if district:
+            known = self.df_malls['district'].dropna().astype(str).unique().tolist()
+            matched = [d for d in known if district in d or d in district]
+            if matched:
+                df = df[df['district'].astype(str).isin(matched)].reset_index(drop=True)
+
         search_terms = []
         if age_group:
             search_terms.append(age_group)
@@ -824,6 +834,14 @@ class ToolRegistry:
         - TGI 80-120: 接近平均水平
         - TGI < 80: 目标人群较少
         """
+        # 归一化 mall_ids：允许逗号分隔字符串（模型偶发把列表写成 "id1,id2"），格式不对就报错而非静默返回空
+        if isinstance(mall_ids, str):
+            mall_ids = [x.strip() for x in mall_ids.replace("，", ",").split(",") if x.strip()]
+        if not isinstance(mall_ids, (list, tuple)):
+            raise ValueError(f"mall_ids 参数格式错误：应为商场ID列表，收到 {type(mall_ids).__name__}")
+        if not mall_ids:
+            raise ValueError("mall_ids 为空：请提供至少一个商场ID")
+
         # 解析目标年龄段
         target_ages = []
         if "18" in target_age or "24" in target_age:
@@ -984,7 +1002,8 @@ REACT_SYSTEM_PROMPT = """你是一个商业选址专家Agent。你需要通过 T
 1. 禁止编造任何数字或事实！所有数据必须来自工具返回的Observation
 2. 匹配度评分必须来自 score_customer_match 工具
 3. 竞品信息必须来自 analyze_brand_competition 工具，并注明其可信度(confidence)
-4. 至少执行3个工具调用后才能给出Final Answer
+4. 给出 Final Answer 前，必须已执行 score_customer_match 拿到真实 TGI 匹配度，且已执行 analyze_brand_competition 拿到竞品数据（两者都是选址结论的必需证据，否则系统会拒绝你的结论）
+5. Final Answer 里每推荐一家商场，必须附上该商场的 mall_id（必须是 Observation 中真实出现的值，禁止编造），格式如 `mall_id: 7360353142875267072`
 
 【选址逻辑】（按重要性排序）
 1. **客群匹配** ⭐⭐⭐⭐⭐（核心）:
@@ -995,7 +1014,7 @@ REACT_SYSTEM_PROMPT = """你是一个商业选址专家Agent。你需要通过 T
 
 3. **客流量** ⭐⭐⭐: get_traffic_ranking 验证排名
 
-4. **竞品分析** ⭐⭐（可选）: analyze_brand_competition 分析品牌竞争
+4. **竞品分析** ⭐⭐（必需）: analyze_brand_competition 分析品牌竞争
    - 返回结果会标注可信度，低可信度需提醒用户实地确认
 
 【top_k参数】快速:15-20 | 全面:30-40
@@ -1007,11 +1026,11 @@ Thought: [分析]
 Action: [工具]
 Action Input: {{"参数": "值"}}
 
-完成3+步后：
-Final Answer: 
+在 score_customer_match 和 analyze_brand_competition 都执行完毕（拿到 Observation）后，才能输出：
+Final Answer:
 
 **推荐Top3商场：**
-1. XX商场 - TGI匹配度XX分，评分XX，客流XX/天
+1. XX商场（mall_id: <该商场ID>） - TGI匹配度XX分，评分XX，客流XX/天
 2. ...
 3. ...
 
@@ -1033,15 +1052,17 @@ class ReActAgent:
         self.report_generator = HTMLReportGenerator()  # 添加报告生成器
 
 
-    def run(self, query: str) -> Tuple[str, List[Dict]]:
+    def run(self, query: str, required_tools: Optional[List[str]] = None) -> Tuple[str, List[Dict]]:
         self.trajectory = []
         self.collected_data = {"malls": [], "competition": []}
         history = ""
-        min_steps = 3  # 最少执行3步工具调用
-        tool_calls = 0  # 记录工具调用次数
+        required_tools = list(required_tools or [])
+        executed_tools = []  # 实际执行过的工具名，用于校验必需工具是否跑齐
         
         for step in range(self.max_steps):
-            response = self._call_llm(query, history)
+            # 终局强制收敛：最后一步不再允许调工具，逼模型用已有 Observation 直接交卷
+            is_last = (step == self.max_steps - 1)
+            response = self._call_llm(query, history, force_final=is_last)
             parsed = self._parse_response(response)
             
             self.trajectory.append({
@@ -1051,22 +1072,39 @@ class ReActAgent:
                 "action_input": parsed.get("action_input"),
             })
             
-            # 检查是否过早结束
+            # 检查是否过早结束：必需工具没跑齐（或没产出必需数据）就不接受 Final Answer
             if parsed.get("final_answer"):
-                if tool_calls < min_steps:
-                    # 强制继续，提示LLM需要更多工具调用
+                missing = self._missing_required_tools(required_tools, executed_tools)
+                if missing and not is_last:
+                    hint = "、".join(missing)
+                    next_tool = missing[0]
                     history += f"\nThought: {parsed.get('thought', '')}\n"
-                    history += f"Observation: 【系统提示】你只调用了{tool_calls}次工具，还需要调用更多工具验证数据。请继续使用 score_customer_match 计算TGI匹配度，或使用其他工具获取更多信息。\n"
-                    self.trajectory[-1]["observation"] = f"系统要求继续调用工具（已调用{tool_calls}次，最少{min_steps}次）"
+                    history += f"Observation: 【系统拒绝】你的 Final Answer 缺必需数据（{hint}），已丢弃。不要再输出 Final Answer，改为调用工具（完整格式）：\nAction: {next_tool}\nAction Input: {{\"参数\": \"值\"}}\n拿到 Observation 后再综合给结论。\n"
+                    self.trajectory[-1]["observation"] = f"系统拒绝最终答案：必需工具 {hint} 尚未执行，请先调用 {next_tool}"
                     continue
                 else:
-                    self.trajectory[-1]["final_answer"] = parsed["final_answer"]
-                    return parsed["final_answer"], self.trajectory
-            
+                    # 终局收敛：最后一步即使缺必需工具也接受，但明确标注缺失，交给溯源块兜底
+                    final_answer = parsed["final_answer"]
+                    if missing:
+                        hint = "、".join(missing)
+                        self.trajectory[-1]["observation"] = f"终局收敛：必需工具 {hint} 未跑齐，结论基于已有数据（可能缺竞品/匹配度）"
+                    # 代码层强制接管：竞品数据没收集到，就删掉模型编造的竞品段，换成固定文案
+                    if not self.collected_data.get("competition"):
+                        final_answer = self._strip_fabricated_competition(final_answer)
+                    self.trajectory[-1]["final_answer"] = final_answer
+                    return final_answer, self.trajectory
+
+            # 终局强制收敛：最后一步无论模型给没给 Final Answer，都用已收集的真实数据确定性交卷
+            if is_last:
+                fallback = self._terminal_answer(query)
+                self.trajectory[-1]["observation"] = "已到最后一步，用已收集的真实数据确定性生成结论（不再调用工具）"
+                self.trajectory[-1]["final_answer"] = fallback
+                return fallback, self.trajectory
+
             if parsed.get("action"):
                 action = parsed["action"]
                 action_input = parsed.get("action_input", {})
-                tool_calls += 1  # 记录工具调用
+                executed_tools.append(action)  # 记录已执行工具
                 
                 result = self.tools.execute(action, **action_input)
                 observation = json.dumps(result.data, ensure_ascii=False, indent=2) if result.success else result.message
@@ -1085,10 +1123,44 @@ class ReActAgent:
                 history += f"Observation: {obs_truncated}\n"
             else:
                 history += f"\nThought: {parsed.get('thought', '')}\n"
-                history += "Observation: 请输出 Action 或 Final Answer\n"
+                history += "Observation: 【格式提示】未检测到 Action。请输出工具调用，格式：\nAction: <工具名>\nAction Input: {\"参数\": \"值\"}\n"
+                self.trajectory[-1]["observation"] = "未检测到 Action（模型未输出工具调用）"
         
         return self._force_summarize(query), self.trajectory
-    
+
+    def _missing_required_tools(self, required_tools: List[str], executed_tools: List[str]) -> List[str]:
+        """返回必需但尚未满足的工具名。
+        score_customer_match / analyze_brand_competition 以满足『已收集到真实数据』为准
+        （而非仅被调用过），这样即使它们被调用但返回空/失败，也会被判为缺失，
+        避免 LLM 拿着编造的 TGI / 竞品结论直接交卷。"""
+        missing = []
+        for t in required_tools:
+            if t == "score_customer_match":
+                if not self.collected_data.get("match_scores"):
+                    missing.append(t)
+            elif t == "analyze_brand_competition":
+                if not self.collected_data.get("competition"):
+                    missing.append(t)
+            elif t not in executed_tools:
+                missing.append(t)
+        return missing
+
+    def _strip_fabricated_competition(self, answer: str) -> str:
+        """代码层兜底：竞品数据缺失时，删除模型在 Final Answer 里编造的竞品段落。
+
+        不能指望模型在兜底时诚实——冒用工具名/可信度标签会让编造内容显得有据可查，
+        所以这里是「写完之后由代码覆盖」，而不是靠提示词让模型别写。"""
+        import re
+        # 1) 删除「竞品情况 / 竞品分析 / 竞争情况」整段（标题到文末）
+        answer = re.sub(r"(?im)^[ \t]*\*{0,2}竞品(情况|分析|竞争|状况)\*{0,2}[：:][\s\S]*$", "", answer)
+        answer = re.sub(r"(?im)^[ \t]*\*{0,2}竞争(情况|分析|状况)\*{0,2}[：:][\s\S]*$", "", answer)
+        # 2) 删除任何提及工具名或「可信度」标签的行（这两个信号只可能来自 analyze_brand_competition）
+        answer = re.sub(r"(?im)^[ \t]*.*(analyze_brand_competition|可信度).*$", "", answer)
+        # 3) 收尾并追加固定文案
+        answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+        answer += "\n\n竞品情况：本次未执行 analyze_brand_competition，结论不含竞品数据。"
+        return answer
+
     def _collect_data(self, action: str, data: Any):
         """收集工具返回的数据，用于生成最终报告"""
         if action in ["search_mall", "get_traffic_ranking", "match_customer_profile", "vector_search_malls"]:
@@ -1124,27 +1196,32 @@ class ReActAgent:
             if isinstance(data, list):
                 self.collected_data["competition"].extend(data)
     
-    def _call_llm(self, query: str, history: str) -> str:
+    def _call_llm(self, query: str, history: str, force_final: bool = False) -> str:
         if not self.llm_client:
-            return self._mock_llm_response(query, history)
-        
+            return self._mock_llm_response(query, history, force_final=force_final)
+
         try:
             from openai import OpenAI
+            instruction = (
+                "【最后一步】这是最后一轮，必须立即输出最终结论，不要再调用任何工具。"
+                "严格按以下格式输出（不要省略前缀）：\n\n"
+                "Final Answer: <推荐商场 + 各自 mall_id + 简要理由>"
+            ) if force_final else "请继续:"
             response = self.llm_client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": REACT_SYSTEM_PROMPT.format(
                         tools=self.tools.get_tools_prompt()
                     )},
-                    {"role": "user", "content": f"用户问题: {query}\n\n历史:\n{history}\n\n请继续:"}
+                    {"role": "user", "content": f"用户问题: {query}\n\n历史:\n{history}\n\n{instruction}"}
                 ],
-                max_tokens=2000  # 增加到2000，避免Final Answer被截断
+                max_tokens=4000  # 竞品数据并入后答案更长，2000 会截断 Final Answer
             )
             return response.choices[0].message.content
         except Exception as e:
             return f"Thought: LLM调用失败: {e}\nFinal Answer: 抱歉，系统出现错误"
     
-    def _mock_llm_response(self, query: str, history: str) -> str:
+    def _mock_llm_response(self, query: str, history: str, force_final: bool = False) -> str:
         """模拟LLM响应 - 客群匹配优先"""
         step_count = history.count("Action:")
         
@@ -1170,7 +1247,11 @@ class ReActAgent:
             "安踏": {"age": "18-40", "consume": "中", "keywords": "大众 运动 家庭"},
         }
         profile = brand_profiles.get(brand, {"age": "25-35", "consume": "中高", "keywords": "白领"})
-        
+
+        # 终局强制收敛：最后一步直接交卷（mock 模式）
+        if force_final:
+            return "Final Answer:\n" + self._generate_final_answer_v2(query, brand, category, profile)
+
         # 提取区域条件
         district = None
         for d in ["徐汇", "静安", "黄浦", "浦东", "长宁", "虹口", "杨浦"]:
@@ -1224,7 +1305,7 @@ Action: analyze_brand_competition
 Action Input: {{"target_brand": "{brand}", "category": "{category}", "mall_names": {json.dumps(mall_names[:3], ensure_ascii=False)}}}"""
         
         elif step_count >= 4:
-            return self._generate_final_answer_v2(query, brand, category, profile)
+            return "Final Answer:\n" + self._generate_final_answer_v2(query, brand, category, profile)
         
         return "Thought: 信息收集完成\nFinal Answer: 请查看以上分析结果"
     
@@ -1306,7 +1387,7 @@ Action Input: {{"target_brand": "{brand}", "category": "{category}", "mall_names
         for i, m in enumerate(sorted_malls, 1):
             # 商场标题
             medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i-1]
-            lines.append(f"### {medal} 第{i}名：{m['name']}")
+            lines.append(f"### {medal} 第{i}名：{m['name']}（mall_id: {m.get('mall_id', '')}）")
             lines.append(f"📍 **{m.get('district', '上海')}**")
             lines.append("")
             
@@ -1488,9 +1569,87 @@ Action Input: {{"target_brand": "{brand}", "category": "{category}", "mall_names
             output.append("\n### 候选商场\n")
             for i, m in enumerate(malls[:5], 1):
                 output.append(f"{i}. {m.get('mall_name', '')} - 评分{m.get('score_market', 0)}")
-        
+
         return "\n".join(output)
-    
+
+    def _terminal_answer(self, query: str) -> str:
+        """终局兜底：模型撞满 max_steps 或最后一步没给出可解析的 Final Answer 时，
+        用已收集的真实数据确定性生成一份带 mall_id 的结论，保证溯源可用、绝不空手而归。"""
+        malls = self.collected_data.get("malls", [])
+        match_scores = self.collected_data.get("match_scores", {}) or {}
+        competition = self.collected_data.get("competition", []) or []
+
+        # 去重合并（同 mall_id 只保留一份）
+        seen = {}
+        for m in malls:
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("mall_id", ""))
+            if not mid or mid in seen:
+                continue
+            seen[mid] = {
+                "mall_id": mid,
+                "mall_name": m.get("mall_name", ""),
+                "district": m.get("district", "") or "",
+                "score_market": m.get("score_market", 0) or 0,
+                "traffic_daily": m.get("traffic_daily", 0) or 0,
+                "match_score": 0,
+                "match_level": "",
+                "competition": "",
+                "competitors": [],
+            }
+
+        # 合并匹配度（match_scores 是 score_customer_match 的权威输出）
+        for mid, sd in match_scores.items():
+            if isinstance(sd, dict) and mid in seen:
+                seen[mid]["match_score"] = sd.get("match_score", 0) or 0
+                seen[mid]["match_level"] = sd.get("match_level", "") or ""
+
+        # 合并竞品（按商场名模糊匹配）
+        for c in competition:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("mall", "") or "")
+            if not name:
+                continue
+            for entry in seen.values():
+                if name in entry["mall_name"] or entry["mall_name"] in name:
+                    entry["competition"] = c.get("competition_level", "") or ""
+                    entry["competitors"] = c.get("competitors", []) or []
+                    break
+
+        ranked = sorted(
+            seen.values(),
+            key=lambda x: (x["match_score"] or 0, x["score_market"], x["traffic_daily"]),
+            reverse=True,
+        )[:5]
+
+        lines = ["## 📊 选址分析报告", "", f"**需求**: {query}", ""]
+        if not ranked:
+            lines += ["（本次未收集到足够的商场数据，请重新提问或调整条件。）"]
+            return "\n".join(lines)
+
+        # 自我标注：本结论由系统兜底生成，不是模型给出的完整结论，避免被当成普通报告
+        lines.append("> ⚠️ 本结论由系统基于已收集数据自动汇总生成（模型未在限定步数内给出完整结论）。")
+        if not competition:
+            lines.append("> ⚠️ 竞品数据缺失：本轮未成功获取 analyze_brand_competition 结果，竞争程度尚未验证，建议实地确认。")
+        lines.append("")
+
+        lines += [f"### 🏆 推荐商场 TOP {len(ranked)}", ""]
+        for i, m in enumerate(ranked, 1):
+            lines.append(f"**{i}. {m['mall_name']}**（mall_id: {m['mall_id']}）")
+            if m["district"]:
+                lines.append(f"   - 区域: {m['district']}")
+            if m["match_score"]:
+                lines.append(f"   - 客群匹配度: {m['match_score']}分 {m['match_level']}".rstrip())
+            if m["competition"]:
+                comp_txt = f"   - 竞争: {m['competition']}"
+                if m["competitors"]:
+                    comp_txt += f"（竞品: {', '.join(m['competitors'])}）"
+                lines.append(comp_txt)
+            lines.append("")
+        return "\n".join(lines)
+
     def format_trajectory(self) -> str:
         output = ["### 🧠 ReAct 推理过程\n"]
         
@@ -1520,13 +1679,13 @@ class HTMLReportGenerator:
     包含：散点图、柱状图、雷达图等可视化图表
     """
     
-    def generate_report(self, brand: str, category: str, profile: Dict, 
+    def generate_report(self, brand: str, category: str, profile: Dict,
                         malls_data: List[Dict], competition_data: List[Dict],
-                        match_scores: Dict) -> str:
+                        match_scores: Dict, final_mall_ids: List[str] = None) -> str:
         """生成完整的HTML报告"""
-        
+
         # 整合数据
-        report_data = self._prepare_data(malls_data, competition_data, match_scores)
+        report_data = self._prepare_data(malls_data, competition_data, match_scores, final_mall_ids)
         
         # 生成HTML
         html = f'''<!DOCTYPE html>
@@ -1992,8 +2151,8 @@ class HTMLReportGenerator:
         
         return html
     
-    def _prepare_data(self, malls_data: List[Dict], competition_data: List[Dict], 
-                      match_scores: Dict) -> List[Dict]:
+    def _prepare_data(self, malls_data: List[Dict], competition_data: List[Dict],
+                      match_scores: Dict, final_mall_ids: List[str] = None) -> List[Dict]:
         """整理报告数据"""
         mall_dict = {}
         
@@ -2028,11 +2187,23 @@ class HTMLReportGenerator:
                     mall_dict[name]["competitors"] = c.get("competitors", [])
                     mall_dict[name]["target_exists"] = c.get("target_brand_exists")
         
-        # 排序
-        sorted_data = sorted(mall_dict.values(), 
-                            key=lambda x: (x.get("match_score", 0), x.get("score", 0), x.get("traffic", 0)),
-                            reverse=True)
-        
+        # 排序：优先按 Final Answer 里的推荐顺序（与正文一致），
+        # 其余商场再按匹配度/评分/客流降序补齐。
+        if final_mall_ids:
+            order = {str(mid): idx for idx, mid in enumerate(final_mall_ids)}
+
+            def _rank_key(entry):
+                mid = str(entry.get("mall_id", ""))
+                if mid in order:
+                    return (0, order[mid])
+                return (1, -float(entry.get("match_score", 0) or 0))
+
+            sorted_data = sorted(mall_dict.values(), key=_rank_key)
+        else:
+            sorted_data = sorted(mall_dict.values(),
+                                 key=lambda x: (x.get("match_score", 0), x.get("score", 0), x.get("traffic", 0)),
+                                 reverse=True)
+
         return sorted_data[:5]
     
     def _generate_ranking_html(self, data: List[Dict]) -> str:
@@ -2211,7 +2382,11 @@ class RouterAgent:
         
         if any(kw in query for kw in ["选址", "开店", "入驻"]) or len(query) > 20:
             return {"type": "site_selection", "confidence": 0.8, "route_to": "react_agent"}
-        
+
+        # 短查询里带「找/推荐/适合 + 商场」也是选址意图（例：始祖鸟找竞争少的高端商场）
+        if any(kw in query for kw in ["商场", "购物中心", "mall"]) and any(kw in query for kw in ["找", "推荐", "适合"]):
+            return {"type": "site_selection", "confidence": 0.85, "route_to": "react_agent"}
+
         if any(kw in query for kw in ["客流", "人流"]):
             return {"type": "traffic", "confidence": 0.85, "route_to": "react_agent"}
         
@@ -2245,6 +2420,58 @@ def _safe_json_load(s):
         return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+# 品牌自指清洗。这份『通用/装饰词』表在两处共用：
+#   1) 找商场名与品牌名的公共子串时，通用词不算「商场专名」，避免把「世纪汇 vs 世纪华联」误判；
+#   2) 从品牌名扣掉公共子串后，剩下的装饰词（设施/地址/门店后缀）也剥掉，判断是否还有真实品牌。
+_BRAND_GENERIC_TOKENS = {
+    # 城市 / 行政区 / 上海地标
+    "上海", "上海市", "北京", "北京市", "广州", "广州市", "深圳", "深圳市",
+    "杭州", "杭州市", "成都", "成都市", "南京", "南京市", "武汉", "武汉市",
+    "浦东", "静安", "徐汇", "长宁", "普陀", "虹口", "杨浦", "黄浦", "闵行",
+    "宝山", "嘉定", "松江", "青浦", "奉贤", "金山", "崇明",
+    "徐家汇", "陆家嘴", "虹桥", "外滩", "五角场", "中山公园",
+    # 商业体通用类型词
+    "中心", "广场", "购物中心", "商城", "百货", "国际", "天地", "新天地", "大厦",
+    # 门店 / 地址后缀
+    "店", "门店", "旗舰店", "专卖店", "专柜", "店铺", "超市", "楼", "号", "路", "街", "大道",
+    # 常见共现词（世纪汇/世纪华联、万达广场/万达影院 这类 2 字词不作判据）
+    "世纪", "万达", "环球", "华联",
+    # 纯设施 / 服务词（不是品牌，属于品牌名里的装饰）
+    "移动小车", "就餐区", "休息区", "服务台", "咨询台", "客服", "前台", "收银",
+}
+
+
+def _brand_is_self_referential(mall_name: str, brand: str) -> bool:
+    """判断代表品牌里的某条目是不是商场自身名称的变体（自指垃圾）。
+
+    做法：品牌名里凡是与商场名共用的、≥2 字、非通用词的公共子串，都视为「商场名」扣掉；
+    再把剩下的装饰词（设施/地址/门店后缀）剥掉。若什么都不剩，说明该条目本质就是商场自身名称，
+    应剔除；若还剩真实品牌内容（如「星巴克金鹰店」扣掉「金鹰」剩「星巴克」），则保留，避免误伤。
+    """
+    mall = re.sub(r"[^一-鿿]", "", str(mall_name or ""))
+    b = re.sub(r"[^一-鿿]", "", str(brand or ""))
+    if len(mall) < 2 or len(b) < 2:
+        return False
+
+    # 收集品牌名里与商场名共用的、≥2 字、非通用词的公共子串
+    common = set()
+    for ln in range(2, min(len(mall), len(b), 8) + 1):
+        for i in range(len(mall) - ln + 1):
+            sub = mall[i:i + ln]
+            if sub in b and sub not in _BRAND_GENERIC_TOKENS:
+                common.add(sub)
+    if not common:
+        return False
+
+    # 扣掉商场名公共子串（长优先），再剥掉装饰词，看还剩不剩真实品牌
+    for sub in sorted(common, key=len, reverse=True):
+        b = b.replace(sub, "")
+    for tok in sorted(_BRAND_GENERIC_TOKENS, key=len, reverse=True):
+        b = b.replace(tok, "")
+
+    return len(b) < 2
 
 
 class MARSAgent:
@@ -2287,41 +2514,56 @@ class MARSAgent:
             self.react_agent = ReActAgent(self.tool_registry, None)
             return f"⚠️ LLM 初始化失败 ({e})，使用模拟模式"
     
-    def _build_evidence_block(self, malls: List[Dict]) -> str:
-        """根据收集到的商场，生成「推荐依据（数据溯源）」段落。
+    def _extract_mall_ids(self, text: str) -> List[str]:
+        """从最终答案里抽取 mall_id（兼容 19 位数字与 SYN 样例两种格式），
+        并与 df_malls 的真实 mall_id 集合取交集，避免把客流/评分等数字或 LLM 编造的 id 误当 mall_id。"""
+        if not text:
+            return []
+        known = set(self.df_malls["mall_id"].astype(str))
+        candidates = re.findall(r'\b\d{15,20}\b|\bSYN\d{3,}\b', text)
+        seen, out = set(), []
+        for c in candidates:
+            if c in known and c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
 
-        每条依据都从 df_malls 宽表真实字段取值（评分/客流/品牌/客群/区位），
-        保证可逐条核对、非模型杜撰，用于降低幻觉、提升用户信任度。
+    def _build_evidence_block(self, mall_ids: List[str]) -> str:
+        """按最终推荐里的 mall_id，生成「推荐依据（数据溯源）」段落。
+
+        每条依据从 df_malls 宽表真实字段 + match_scores（score_customer_match 补充）取值，
+        保证溯源与最终结论严格对齐、可逐条核对、非模型杜撰。
         """
-        if not malls:
+        if not mall_ids:
             return ""
 
-        # 按 mall_id 去重，保留出现顺序，最多 5 家
+        # 去重、保留出现顺序，最多 5 家
         seen, uniq = set(), []
-        for m in malls:
-            mid = str(m.get("mall_id", "") or "")
-            if mid:
-                if mid in seen:
-                    continue
+        for mid in mall_ids:
+            mid = str(mid or "")
+            if mid and mid not in seen:
                 seen.add(mid)
-            uniq.append(m)
+                uniq.append(mid)
             if len(uniq) >= 5:
                 break
         if not uniq:
             return ""
 
-        lines = ["\n### 📎 推荐依据（数据溯源）\n",
-                 "> 以下每条依据均取自商场宽表真实字段，可逐条核对，非模型杜撰。\n"]
+        match_scores = self.react_agent.collected_data.get("match_scores", {}) if self.react_agent else {}
 
-        for i, m in enumerate(uniq, 1):
-            mid = str(m.get("mall_id", "") or "")
+        lines = ["\n### 📎 推荐依据（数据溯源）\n",
+                 "> 以下每条依据均取自商场宽表真实字段，与最终推荐逐一对齐，可逐条核对，非模型杜撰。\n"]
+
+        for i, mid in enumerate(uniq, 1):
             row = self.df_malls[self.df_malls["mall_id"].astype(str) == mid]
             r = row.iloc[0] if len(row) else None
+            if r is None:
+                continue
 
-            name = m.get("mall_name") or (r["mall_name"] if r is not None else "未知")
-            district = m.get("district") or (str(r.get("district", "")) if r is not None else "")
-            score = m.get("score_market") or (r["score_market"] if r is not None else 0)
-            traffic = m.get("traffic_daily") or (r["traffic_daily"] if r is not None else 0)
+            name = str(r.get("mall_name", "") or "未知")
+            district = str(r.get("district", "") or "")
+            score = r.get("score_market", 0)
+            traffic = r.get("traffic_daily", 0)
 
             head = f"**{i}. {name}**"
             if district:
@@ -2331,13 +2573,14 @@ class MARSAgent:
             lines.append(head)
 
             bullets = []
-            ms = m.get("match_score")
+            ms_data = match_scores.get(mid, {})
+            ms = ms_data.get("match_score") if isinstance(ms_data, dict) else None
             if ms is not None:
-                ml = m.get("match_level", "")
+                ml = ms_data.get("match_level", "")
                 bullets.append(f"- 匹配度：{ml}（TGI {ms} 分）" if ml else f"- 匹配度：{ms} 分")
 
             # 消费能力 / 客单价（position_text）
-            pos = str(r.get("position_text", "") or "") if r is not None else ""
+            pos = str(r.get("position_text", "") or "")
             consume = _rx_first(r"消费能力[：:]([^。；]+)", pos)
             price = _rx_first(r"客单价([0-9]+[-~][0-9]+元)", pos)
             if consume:
@@ -2346,31 +2589,30 @@ class MARSAgent:
                 bullets.append(f"- 客单价：{price}")
 
             # 客群（profile_text）
-            pt = str(r.get("profile_text", "") or "") if r is not None else ""
+            pt = str(r.get("profile_text", "") or "")
             age = _rx_first(r"age[：:]([^；;]+)", pt)
             cons = _rx_first(r"consume[：:]([^；;]+)", pt)
             if age or cons:
                 seg = "、".join(x for x in [age, cons] if x)
                 bullets.append(f"- 客群：{seg}")
 
-            # 代表品牌（brand_data_json.top_brands）
-            if r is not None:
-                bd = _safe_json_load(r.get("brand_data_json"))
-                brands = bd.get("top_brands", []) or []
-                if brands:
-                    bullets.append(f"- 代表品牌：{_trunc('、'.join(str(b) for b in brands[:6]), 60)}")
+            # 代表品牌（brand_data_json.top_brands），剔除商场自身名称的自指条目
+            bd = _safe_json_load(r.get("brand_data_json"))
+            brands = bd.get("top_brands", []) or []
+            brands = [b for b in brands if not _brand_is_self_referential(name, str(b))]
+            if brands:
+                bullets.append(f"- 代表品牌：{_trunc('、'.join(str(b) for b in brands[:6]), 60)}")
 
             # 品类结构（门店数前 2 的品类）
-            if r is not None:
-                cat_counts = []
-                for cat in ["餐饮", "服装", "娱乐服务", "运动", "珠宝", "护肤化妆品"]:
-                    cnt = r.get(f"{cat}_brand_count", 0) or 0
-                    if cnt:
-                        cat_counts.append((cat, int(cnt)))
-                if cat_counts:
-                    cat_counts.sort(key=lambda x: -x[1])
-                    top2 = "、".join(f"{c}({n})" for c, n in cat_counts[:2])
-                    bullets.append(f"- 品类结构：{top2}")
+            cat_counts = []
+            for cat in ["餐饮", "服装", "娱乐服务", "运动", "珠宝", "护肤化妆品"]:
+                cnt = r.get(f"{cat}_brand_count", 0) or 0
+                if cnt:
+                    cat_counts.append((cat, int(cnt)))
+            if cat_counts:
+                cat_counts.sort(key=lambda x: -x[1])
+                top2 = "、".join(f"{c}({n})" for c, n in cat_counts[:2])
+                bullets.append(f"- 品类结构：{top2}")
 
             if not bullets:
                 bullets.append("- （仅基础评分/客流，无额外字段）")
@@ -2403,7 +2645,11 @@ class MARSAgent:
         
         output.append("### 🤖 Step 2: ReAct 推理\n\n")
         
-        final_answer, trajectory = self.react_agent.run(user_input)
+        # 必需工具守卫挂在「真实执行路径」上，不再看 Router 的意图标签：
+        # recommend() 无条件走 ReAct 选址推理，所以两个证据工具始终必调，
+        # 避免 Router 判错意图（如把「始祖鸟找…商场」误判成 simple_query）时守卫被整体绕过。
+        required_tools = ["score_customer_match", "analyze_brand_competition"]
+        final_answer, trajectory = self.react_agent.run(user_input, required_tools=required_tools)
         
         # 显示推理过程
         output.append(self.react_agent.format_trajectory())
@@ -2413,17 +2659,24 @@ class MARSAgent:
             output.append("\n### 📋 最终推荐\n\n")
             output.append(final_answer)
 
-        # 推荐依据（数据溯源）
-        evidence = self._build_evidence_block(self.react_agent.collected_data.get("malls", []))
-        if evidence:
-            output.append(evidence)
+        # 推荐依据（数据溯源）—— 按最终答案里的 mall_id 取证据，与最终推荐严格对齐
+        final_mall_ids = self._extract_mall_ids(final_answer)
+        if final_mall_ids:
+            evidence = self._build_evidence_block(final_mall_ids)
+            if evidence:
+                output.append(evidence)
+        else:
+            # 抽不到 mall_id 时显式告知溯源不可用，绝不静默回退到 dump 候选池
+            output.append("\n### 📎 推荐依据（数据溯源）\n\n> ⚠️ 本次未能从最终结论中提取到商场标识（mall_id），溯源不可用。\n")
+            if final_answer:
+                print("[MARS][WARN] 最终答案存在但未提取到 mall_id，溯源降级为不可用。")
 
-        # 生成HTML报告
-        html_path = self._generate_html_report(user_input)
+        # 生成HTML报告（TOP5 按 Final Answer 推荐顺序渲染，与正文一致）
+        html_path = self._generate_html_report(user_input, final_mall_ids)
 
         return "".join(output), html_path
-    
-    def _generate_html_report(self, query: str) -> str:
+
+    def _generate_html_report(self, query: str, final_mall_ids: List[str] = None) -> str:
         """生成HTML报告并保存"""
         try:
             # 提取品牌和品类
@@ -2464,7 +2717,8 @@ class MARSAgent:
                 profile=profile,
                 malls_data=malls_data,
                 competition_data=competition_data,
-                match_scores=match_scores
+                match_scores=match_scores,
+                final_mall_ids=final_mall_ids
             )
             
             # 保存到文件
