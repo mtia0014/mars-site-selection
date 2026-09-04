@@ -937,7 +937,12 @@ class ToolRegistry:
                 result["match_level"] = "⭐ 匹配度较低"
             
             results.append(result)
-        
+
+        # 空结果：mall_ids 里没有一个能对上宽表（模型传了编造/错误的 ID），
+        # 直接报错给一句可行动的反馈，而不是干巴巴的 []，免得模型拿空结果去脑补分数。
+        if not results:
+            raise ValueError("未匹配到任何商场，请用 search_mall 拿到的 mall_id 重试")
+
         # 按匹配分排序
         results.sort(key=lambda x: x.get('match_score', 0), reverse=True)
 
@@ -1230,6 +1235,7 @@ class ReActAgent:
                     )},
                     {"role": "user", "content": f"用户问题: {query}\n\n历史:\n{history}\n\n{instruction}"}
                 ],
+                stop=["\nObservation:", "\nObservation："],  # 截断模型伪造 Observation（role-play 环境），Observation 只由系统注入
                 max_tokens=4000  # 竞品数据并入后答案更长，2000 会截断 Final Answer
             )
             return response.choices[0].message.content
@@ -1540,22 +1546,31 @@ Action Input: {{"target_brand": "{brand}", "category": "{category}", "mall_names
         if thought_match:
             result["thought"] = thought_match.group(1).strip()
         
-        final_match = re.search(r'Final Answer:\s*(.+)', response, re.DOTALL)
-        if final_match:
-            result["final_answer"] = final_match.group(1).strip()
+        # 模型可能在同一轮既写 Action 又写 Final Answer（尤其竞品分析后想直接收尾）。
+        # 之前先匹配 Final Answer 就 early-return，会把合法的 Action 整条丢掉，
+        # 只剩结论被闸门拒绝、白白浪费一轮。改成「谁先出现听谁的」：
+        final_pos = response.find("Final Answer:")
+        action_pos = response.find("Action:")
+        has_final = final_pos != -1
+        has_action = action_pos != -1
+
+        if has_final and (not has_action or final_pos < action_pos):
+            final_match = re.search(r'Final Answer:\s*(.+)', response, re.DOTALL)
+            if final_match:
+                result["final_answer"] = final_match.group(1).strip()
             return result
-        
+
         action_match = re.search(r'Action:\s*(\w+)', response)
         if action_match:
             result["action"] = action_match.group(1).strip()
-        
+
         input_match = re.search(r'Action Input:\s*(\{.+?\})', response, re.DOTALL)
         if input_match:
             try:
                 result["action_input"] = json.loads(input_match.group(1))
             except:
                 result["action_input"] = {}
-        
+
         return result
     
     def _force_summarize(self, query: str) -> str:
