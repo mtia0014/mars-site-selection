@@ -4,7 +4,7 @@ MARS FastAPI 服务
 
 注意：本文件已与 mars_agent.py 对齐。
 当前版本的 MARSAgent 不再包含 memory / reranker 子系统，
-相关端点已做无状态降级处理。
+相关端点已移除。
 """
 
 import os
@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MARS API",
-    description="Memory-Augmented Reasoning for Spatial Decisions",
+    description="Multi-source Agent Reasoning for Site-selection",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -280,7 +280,7 @@ async def feedback(request: FeedbackRequest):
     """提交反馈（当前版本为无状态降级实现）"""
     return {
         "success": True,
-        "message": "已收到反馈（当前版本未启用记忆系统）",
+        "message": "已收到反馈（当前版本未持久化）",
         "feedback": request.feedback_type,
     }
 
@@ -302,21 +302,6 @@ async def list_tools():
     for name, tool in a.tool_registry.tools.items():
         tools.append({"name": name, "description": tool.description, "parameters": tool.parameters})
     return {"tools": tools}
-
-
-@app.get("/api/memory")
-async def get_memory(user_id: str = "default"):
-    """获取用户记忆状态（当前版本未启用记忆系统）"""
-    return {
-        "user_id": user_id,
-        "note": "当前版本未启用记忆系统",
-        "weights": {},
-    }
-
-
-@app.delete("/api/memory")
-async def clear_memory(user_id: str = "default"):
-    return {"success": True, "message": "记忆系统未启用，无需清空"}
 
 
 # ============================================================
@@ -354,7 +339,6 @@ if __name__ == "__main__":
     print("  POST /api/feedback    - 提交反馈")
     print("  POST /api/tool        - 调用工具")
     print("  GET  /api/tools       - 工具列表")
-    print("  GET  /api/memory      - 获取记忆")
     print("  GET  /api/stats       - 系统统计")
     print("=" * 60)
     print("\n启动服务...")

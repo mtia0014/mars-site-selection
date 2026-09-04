@@ -64,7 +64,6 @@ if hasattr(sys.stderr, "reconfigure"):
 
 DATA_FILE = "mall_wide_table_shanghai_final_v3.csv"
 CHROMA_DIR = "./chroma_db"
-MEMORY_DIR = "./memory"
 
 # LLM 配置
 LLM_PROVIDER = "deepseek"
@@ -1088,9 +1087,8 @@ class ReActAgent:
                     if missing:
                         hint = "、".join(missing)
                         self.trajectory[-1]["observation"] = f"终局收敛：必需工具 {hint} 未跑齐，结论基于已有数据（可能缺竞品/匹配度）"
-                    # 代码层强制接管：竞品数据没收集到，就删掉模型编造的竞品段，换成固定文案
-                    if not self.collected_data.get("competition"):
-                        final_answer = self._strip_fabricated_competition(final_answer)
+                    # 代码层强制接管：竞品/匹配度数据没收集到，就删掉模型编造的对应内容，换成固定文案
+                    final_answer = self._strip_fabricated_sections(final_answer)
                     self.trajectory[-1]["final_answer"] = final_answer
                     return final_answer, self.trajectory
 
@@ -1145,20 +1143,37 @@ class ReActAgent:
                 missing.append(t)
         return missing
 
-    def _strip_fabricated_competition(self, answer: str) -> str:
-        """代码层兜底：竞品数据缺失时，删除模型在 Final Answer 里编造的竞品段落。
+    def _strip_fabricated_sections(self, answer: str) -> str:
+        """代码层兜底：按已收集到的真实数据，删除模型在 Final Answer 里编造的对应内容。
 
-        不能指望模型在兜底时诚实——冒用工具名/可信度标签会让编造内容显得有据可查，
-        所以这里是「写完之后由代码覆盖」，而不是靠提示词让模型别写。"""
+        不能指望模型在兜底时诚实——冒用工具名/可信度/匹配度标签会让编造内容显得有据可查，
+        所以这里是「写完之后由代码覆盖」，而不是靠提示词让模型别写。
+
+        两个必需工具各自对应一段：analyze_brand_competition → 竞品段，
+        score_customer_match → 匹配度数字。数据没收集到就删对应内容、换成固定文案。
+        逐段/逐短语清理，不假设某段一定在末尾（竞品段可能被模型写在正文中间）。"""
         import re
-        # 1) 删除「竞品情况 / 竞品分析 / 竞争情况」整段（标题到文末）
-        answer = re.sub(r"(?im)^[ \t]*\*{0,2}竞品(情况|分析|竞争|状况)\*{0,2}[：:][\s\S]*$", "", answer)
-        answer = re.sub(r"(?im)^[ \t]*\*{0,2}竞争(情况|分析|状况)\*{0,2}[：:][\s\S]*$", "", answer)
-        # 2) 删除任何提及工具名或「可信度」标签的行（这两个信号只可能来自 analyze_brand_competition）
-        answer = re.sub(r"(?im)^[ \t]*.*(analyze_brand_competition|可信度).*$", "", answer)
-        # 3) 收尾并追加固定文案
+
+        # 1) 竞品：analyze_brand_competition 没拿到数据
+        if not self.collected_data.get("competition"):
+            # 删「竞品情况/竞品分析/竞争情况」段：从标题删到下一个段落边界
+            # （数字列表「1.」/粗体「**」/常见标题词），而不是删到文末。
+            boundary = r"(?=^[ \t]*(?:\d+\.|\*\*|推荐|评分|客流|客群|代表品牌|品类|数据来源|匹配度)|\Z)"
+            answer = re.sub(
+                r"(?im)^[ \t]*\*{0,2}(?:竞品|竞争)(?:情况|分析|竞争|状况)?\*{0,2}[：:][\s\S]*?" + boundary,
+                "", answer)
+            # 兜底：逐行删残留的竞品关键词行（工具名/可信度标签只可能来自竞品工具）
+            answer = re.sub(r"(?im)^[ \t]*.*(analyze_brand_competition|可信度|competitor).*$", "", answer)
+            answer = answer.rstrip() + "\n\n竞品情况：本次未执行 analyze_brand_competition，结论不含竞品数据。"
+
+        # 2) 匹配度：score_customer_match 没拿到数据
+        if not self.collected_data.get("match_scores"):
+            # 「匹配度/TGI匹配度 XX 分」这类数字是编造的，做短语级删除，
+            # 保留商场名 / mall_id 等真实字段（不能整行删，否则会把推荐条目一起删掉）。
+            answer = re.sub(r"(?i)(TGI\s*)?匹配度\s*\d+(?:\.\d+)?\s*分(?:[（(][^）)]*[）)])?", "", answer)
+            answer = answer.rstrip() + "\n\n匹配度：本次未执行 score_customer_match，结论不含 TGI 匹配度数据。"
+
         answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
-        answer += "\n\n竞品情况：本次未执行 analyze_brand_competition，结论不含竞品数据。"
         return answer
 
     def _collect_data(self, action: str, data: Any):
@@ -2633,11 +2648,11 @@ class MARSAgent:
         
         output = []
         
-        # 路由
-        output.append("### 🚦 Step 1: 意图路由\n\n")
+        # 意图识别（Router 的 route_to 仅供 API 流式路径分流；本推荐流程统一走 ReAct）
+        output.append("### 🚦 Step 1: 意图识别\n\n")
         route_result = self.router.run({"query": user_input})
         output.append(f"- 意图类型: **{route_result['intent']}**\n")
-        output.append(f"- 路由到: `{route_result['route_to']}`\n\n")
+        output.append(f"- 处理路径: 选址推荐统一走 ReAct 多工具推理\n\n")
         
         # ReAct 推理
         if self.react_agent is None:
@@ -2706,7 +2721,29 @@ class MARSAgent:
             profile = brand_profiles.get(brand, {"age": "25-35", "consume": "中高", "keywords": "白领"})
             
             # 获取收集的数据
-            malls_data = self.react_agent.collected_data.get("malls", [])
+            malls_data = list(self.react_agent.collected_data.get("malls", []))
+            # 补齐：collected_data["malls"] 只覆盖检索类工具，get_mall_detail / compare_malls
+            # 返回的商场不在其中。按最终推荐的 mall_id 从 df_malls 直查补齐，
+            # 保证 HTML TOP5 与最终推荐一致（与证据块同源，非依赖模型调用过的工具）。
+            if final_mall_ids:
+                have_ids = {str(m.get("mall_id", "")) for m in malls_data}
+                for mid in final_mall_ids:
+                    mid = str(mid)
+                    if mid in have_ids:
+                        continue
+                    row = self.df_malls[self.df_malls["mall_id"].astype(str) == mid]
+                    if len(row):
+                        r = row.iloc[0]
+                        malls_data.append({
+                            "mall_name": str(r.get("mall_name", "") or ""),
+                            "mall_id": mid,
+                            "district": str(r.get("district", "") or ""),
+                            "traffic_daily": to_json_serializable(r.get("traffic_daily", 0)) or 0,
+                            "score_market": to_json_serializable(r.get("score_market", 0)) or 0,
+                            "match_score": 0,
+                            "match_level": "",
+                        })
+                        have_ids.add(mid)
             competition_data = self.react_agent.collected_data.get("competition", [])
             match_scores = self.react_agent.collected_data.get("match_scores", {})
             

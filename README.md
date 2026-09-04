@@ -1,6 +1,6 @@
 # MARS 智能选址系统（上海商场 RAG）
 
-Memory-Augmented Reasoning for Spatial Decisions —— 商场选址检索问答系统。核心是「商场宽表 → 嵌入 → Chroma 向量库 → 多查询混合检索」。
+MARS（Multi-source Agent Reasoning for Site-selection）—— 商场选址检索问答系统。核心是「商场宽表 → 嵌入 → Chroma 向量库 → 多查询混合检索 → ReAct 多工具推理」。
 
 ## Demo
 
