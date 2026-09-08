@@ -2950,7 +2950,7 @@ with gr.Blocks(title="🧠 MARS v1.0") as demo:
         
         ### 检索与推理
         - 三级混合检索：BM25 + 稠密 RRF + 知识图谱 2-hop（逐级回退）
-        - 多智能体协作：Router → ReAct → CompetitorSearchAgent
+        - 单智能体 + 工具编排：Router 分流 → ReAct 循环 → 9 类工具调用
         - 竞品分析为实验性 LLM 辅助信号（标注置信度与来源，非事实数据源）
         
         ### 可用工具（9 类）
