@@ -14,6 +14,7 @@ models/
 # ===== 运行时产物 =====
 memory/
 reports/
+*.log
 
 # ===== 评测结果（可重新生成）=====
 *_result.json
